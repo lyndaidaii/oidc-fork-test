@@ -2,6 +2,9 @@ name: "Fork PR OIDC check"
 
 on:
   pull_request:
+  pull_request_target:
+  issue_comment:
+    types: [created]
 
 permissions:
   id-token: write
@@ -17,7 +20,11 @@ jobs:
           echo "repository (base): ${{ github.repository }}"
           echo "head_repo: ${{ github.event.pull_request.head.repo.full_name }}"
           echo "base_repo: ${{ github.event.pull_request.base.repo.full_name }}"
-          echo "is fork PR: ${{ github.event.pull_request.head.repo.full_name != github.repository }}"
+          echo "is fork PR (pull_request/pull_request_target): ${{ github.event.pull_request.head.repo.full_name != github.repository }}"
+          echo "issue_comment -> is this comment on a PR: ${{ github.event.issue.pull_request != null }}"
+          echo "issue_comment -> issue/PR number: ${{ github.event.issue.number }}"
+          echo "comment author: ${{ github.event.comment.user.login }}"
+          echo "actor: ${{ github.actor }}"
           echo "ACTIONS_ID_TOKEN_REQUEST_URL is set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_URL" ] && echo true || echo false)"
           echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN is set: $([ -n "$ACTIONS_ID_TOKEN_REQUEST_TOKEN" ] && echo true || echo false)"
 
