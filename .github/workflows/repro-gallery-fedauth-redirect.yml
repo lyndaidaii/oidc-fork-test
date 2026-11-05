@@ -114,6 +114,27 @@ jobs:
           $oidcToken = $oidcResponse.value
           Write-Host "::add-mask::$oidcToken"
 
+          $payload = $oidcToken.Split(".")[1]
+          $payload += "=" * ((4 - ($payload.Length % 4)) % 4)
+          $payload = $payload.Replace("-", "+").Replace("_", "/")
+          $claims = [Text.Encoding]::UTF8.GetString(
+              [Convert]::FromBase64String($payload)) |
+              ConvertFrom-Json
+
+          [PSCustomObject] @{
+              Audience = $claims.aud
+              Environment = $claims.environment
+              JobWorkflowRef = $claims.job_workflow_ref
+              Ref = $claims.ref
+              Repository = $claims.repository
+              Subject = $claims.sub
+              Workflow = $claims.workflow
+              WorkflowRef = $claims.workflow_ref
+          } |
+              Format-List |
+              Out-String |
+              Write-Host
+
           $exchangeBody = @{
               publisherName = "${{ inputs.authorizedPublisher }}"
           } | ConvertTo-Json -Compress
