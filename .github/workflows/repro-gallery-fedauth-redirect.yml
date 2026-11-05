@@ -280,8 +280,78 @@ jobs:
 
           if ($env:MARKETPLACE_CREDENTIAL_KIND -ne "marketplace-exchanged")
           {
+              function Invoke-FederatedTokenUpload
+              {
+                  param(
+                      [Parameter(Mandatory = $true)]
+                      [bool] $SuppressRedirect
+                  )
+
+                  $headers = @{
+                      Authorization =
+                          "FederatedToken $env:MARKETPLACE_CREDENTIAL"
+                      Accept = "application/json"
+                      "User-Agent" = "GalleryFedAuthRedirectRepro"
+                  }
+
+                  if ($SuppressRedirect)
+                  {
+                      $headers["X-TFS-FedAuthRedirect"] = "Suppress"
+                  }
+
+                  $response = Invoke-WebRequest `
+                      -Method Post `
+                      -Uri $targetUrl `
+                      -Headers $headers `
+                      -ContentType "application/json" `
+                      -Body $requestBody `
+                      -MaximumRedirection 10 `
+                      -SkipHttpErrorCheck
+
+                  $contentType =
+                      [string] $response.Headers["Content-Type"]
+
+                  [PSCustomObject] @{
+                      StatusCode = [int] $response.StatusCode
+                      ContentType = $contentType
+                      IsHtml = $contentType.StartsWith(
+                          "text/html",
+                          [StringComparison]::OrdinalIgnoreCase)
+                  }
+              }
+
+              $federatedWithoutSuppression =
+                  Invoke-FederatedTokenUpload -SuppressRedirect $false
+              $federatedWithSuppression =
+                  Invoke-FederatedTokenUpload -SuppressRedirect $true
+
+              Write-Host (
+                  "FederatedToken without suppression: HTTP " +
+                  "$($federatedWithoutSuppression.StatusCode), " +
+                  "Content-Type " +
+                  "'$($federatedWithoutSuppression.ContentType)', " +
+                  "HTML=$($federatedWithoutSuppression.IsHtml)")
+
+              Write-Host (
+                  "FederatedToken with suppression: HTTP " +
+                  "$($federatedWithSuppression.StatusCode), " +
+                  "Content-Type " +
+                  "'$($federatedWithSuppression.ContentType)', " +
+                  "HTML=$($federatedWithSuppression.IsHtml)")
+
+              if ($federatedWithoutSuppression.StatusCode -ne 200 -or
+                  -not $federatedWithoutSuppression.IsHtml -or
+                  $federatedWithSuppression.StatusCode -notin @(401, 403) -or
+                  $federatedWithSuppression.IsHtml)
+              {
+                  throw (
+                      "The FederatedToken requests did not reproduce the " +
+                      "expected redirect suppression behavior.")
+              }
+
               throw (
-                  "Endpoint behavior was reproduced with an invalid Bearer " +
-                  "token, but the Marketplace policy must be corrected to " +
+                  "Endpoint behavior was reproduced with invalid Bearer and " +
+                  "FederatedToken credentials, but the Marketplace policy " +
+                  "must be corrected to " +
                   "complete the valid-token reproduction.")
           }
