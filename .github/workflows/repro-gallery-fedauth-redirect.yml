@@ -156,7 +156,13 @@ jobs:
           if ([int] $exchangeHttpResponse.StatusCode -notin 200..299)
           {
               Write-Host $exchangeHttpResponse.Content
-              throw "Marketplace token exchange failed."
+              Write-Warning (
+                  "Marketplace token exchange failed. Continuing with the " +
+                  "raw GitHub OIDC token only to diagnose FedAuth redirect " +
+                  "behavior; this is not the valid-token reproduction.")
+              "credential=$oidcToken" >> $env:GITHUB_OUTPUT
+              "credentialKind=unexchanged-github-oidc" >> $env:GITHUB_OUTPUT
+              exit 0
           }
 
           $exchangeResponse =
@@ -170,11 +176,13 @@ jobs:
 
           Write-Host "::add-mask::$credential"
           "credential=$credential" >> $env:GITHUB_OUTPUT
+          "credentialKind=marketplace-exchanged" >> $env:GITHUB_OUTPUT
 
       - name: Compare unauthorized upload responses
         shell: pwsh
         env:
           MARKETPLACE_CREDENTIAL: ${{ steps.exchange.outputs.credential }}
+          MARKETPLACE_CREDENTIAL_KIND: ${{ steps.exchange.outputs.credentialKind }}
           VSIX_PATH: ${{ steps.package.outputs.vsixPath }}
         run: |
           $ErrorActionPreference = "Stop"
@@ -183,6 +191,9 @@ jobs:
               "$env:MARKETPLACE_URL/_apis/gallery/publishers/" +
               "${{ inputs.unauthorizedPublisher }}/extensions" +
               "?api-version=7.2-preview.1"
+
+          Write-Host "Credential kind: $env:MARKETPLACE_CREDENTIAL_KIND"
+          Write-Host "Target endpoint: $targetUrl"
 
           $extensionManifest =
               [Convert]::ToBase64String(
@@ -266,3 +277,11 @@ jobs:
           }
 
           Write-Host "Gallery FedAuth redirect behavior reproduced."
+
+          if ($env:MARKETPLACE_CREDENTIAL_KIND -ne "marketplace-exchanged")
+          {
+              throw (
+                  "Endpoint behavior was reproduced with an invalid Bearer " +
+                  "token, but the Marketplace policy must be corrected to " +
+                  "complete the valid-token reproduction.")
+          }
