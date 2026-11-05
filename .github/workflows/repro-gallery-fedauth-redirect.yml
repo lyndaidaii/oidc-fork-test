@@ -19,7 +19,6 @@ permissions:
 jobs:
   reproduce:
     runs-on: windows-latest
-    environment: Test
 
     env:
       MARKETPLACE_URL: https://marketplace.vsallin.net
@@ -139,7 +138,7 @@ jobs:
               publisherName = "${{ inputs.authorizedPublisher }}"
           } | ConvertTo-Json -Compress
 
-          $exchangeResponse = Invoke-RestMethod `
+          $exchangeHttpResponse = Invoke-WebRequest `
               -Method Post `
               -Uri $env:EXCHANGE_URL `
               -Headers @{
@@ -147,7 +146,21 @@ jobs:
                   "User-Agent" = "GalleryFedAuthRedirectRepro"
               } `
               -ContentType "application/json" `
-              -Body $exchangeBody
+              -Body $exchangeBody `
+              -SkipHttpErrorCheck
+
+          Write-Host (
+              "Token exchange: HTTP " +
+              [int] $exchangeHttpResponse.StatusCode)
+
+          if ([int] $exchangeHttpResponse.StatusCode -notin 200..299)
+          {
+              Write-Host $exchangeHttpResponse.Content
+              throw "Marketplace token exchange failed."
+          }
+
+          $exchangeResponse =
+              $exchangeHttpResponse.Content | ConvertFrom-Json
 
           $credential = $exchangeResponse.credential
           if ([string]::IsNullOrWhiteSpace($credential))
