@@ -1,0 +1,234 @@
+name: Reproduce Gallery FedAuth redirect
+
+on:
+  workflow_dispatch:
+    inputs:
+      authorizedPublisher:
+        description: Publisher authorized by the Marketplace OIDC policy
+        required: true
+        default: xiaodaidai
+      unauthorizedPublisher:
+        description: Existing publisher that the exchanged credential cannot manage
+        required: true
+        default: lynndaidai
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  reproduce:
+    runs-on: windows-latest
+    environment: Test
+
+    env:
+      MARKETPLACE_URL: https://marketplace.vsallin.net
+      EXCHANGE_URL: https://marketplace.vsallin.net/_apis/gallery/token?api-version=7.2-preview.1
+      VSCE_VERSION: 4.0.1-1
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Package test extension
+        id: package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $packageDirectory =
+              Join-Path $env:RUNNER_TEMP "gallery-fedauth-redirect-repro"
+          New-Item -ItemType Directory -Path $packageDirectory -Force |
+              Out-Null
+
+          @{
+              name = "gallery-fedauth-redirect-repro"
+              displayName = "Gallery FedAuth Redirect Repro"
+              description = "Disposable package for Gallery API diagnostics"
+              version = "1.0.0"
+              publisher = "${{ inputs.authorizedPublisher }}"
+              engines = @{
+                  vscode = "^1.90.0"
+              }
+              main = "./extension.js"
+              activationEvents = @()
+          } |
+              ConvertTo-Json -Depth 4 |
+              Set-Content `
+                  -LiteralPath (Join-Path $packageDirectory "package.json") `
+                  -Encoding utf8
+
+          "module.exports.activate = function () {};" |
+              Set-Content `
+                  -LiteralPath (Join-Path $packageDirectory "extension.js") `
+                  -Encoding utf8
+
+          $vsixPath = Join-Path $env:RUNNER_TEMP "gallery-fedauth-redirect-repro.vsix"
+
+          Push-Location $packageDirectory
+          try
+          {
+              & npx.cmd --yes "@vscode/vsce@$env:VSCE_VERSION" package `
+                  --out $vsixPath `
+                  --no-dependencies
+              if ($LASTEXITCODE -ne 0)
+              {
+                  throw "VSIX packaging failed with exit code $LASTEXITCODE."
+              }
+          }
+          finally
+          {
+              Pop-Location
+          }
+
+          if (-not (Test-Path -LiteralPath $vsixPath -PathType Leaf) -or
+              (Get-Item -LiteralPath $vsixPath).Length -eq 0)
+          {
+              throw "Packaging produced no VSIX: $vsixPath"
+          }
+
+          "vsixPath=$vsixPath" >> $env:GITHUB_OUTPUT
+
+      - name: Exchange GitHub OIDC token
+        id: exchange
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $oidcUrl =
+              "$env:ACTIONS_ID_TOKEN_REQUEST_URL" +
+              "&audience=marketplace.visualstudio.com"
+
+          $oidcResponse = Invoke-RestMethod `
+              -Method Get `
+              -Uri $oidcUrl `
+              -Headers @{
+                  Authorization = "bearer $env:ACTIONS_ID_TOKEN_REQUEST_TOKEN"
+              }
+
+          $oidcToken = $oidcResponse.value
+          Write-Host "::add-mask::$oidcToken"
+
+          $exchangeBody = @{
+              publisherName = "${{ inputs.authorizedPublisher }}"
+          } | ConvertTo-Json -Compress
+
+          $exchangeResponse = Invoke-RestMethod `
+              -Method Post `
+              -Uri $env:EXCHANGE_URL `
+              -Headers @{
+                  Authorization = "FederatedToken $oidcToken"
+                  "User-Agent" = "GalleryFedAuthRedirectRepro"
+              } `
+              -ContentType "application/json" `
+              -Body $exchangeBody
+
+          $credential = $exchangeResponse.credential
+          if ([string]::IsNullOrWhiteSpace($credential))
+          {
+              throw "Exchange response did not contain a credential."
+          }
+
+          Write-Host "::add-mask::$credential"
+          "credential=$credential" >> $env:GITHUB_OUTPUT
+
+      - name: Compare unauthorized upload responses
+        shell: pwsh
+        env:
+          MARKETPLACE_CREDENTIAL: ${{ steps.exchange.outputs.credential }}
+          VSIX_PATH: ${{ steps.package.outputs.vsixPath }}
+        run: |
+          $ErrorActionPreference = "Stop"
+
+          $targetUrl =
+              "$env:MARKETPLACE_URL/_apis/gallery/publishers/" +
+              "${{ inputs.unauthorizedPublisher }}/extensions" +
+              "?api-version=7.2-preview.1"
+
+          $extensionManifest =
+              [Convert]::ToBase64String(
+                  [IO.File]::ReadAllBytes($env:VSIX_PATH))
+
+          $requestBody = @{
+              extensionManifest = $extensionManifest
+          } | ConvertTo-Json -Compress
+
+          function Invoke-UnauthorizedUpload
+          {
+              param(
+                  [Parameter(Mandatory = $true)]
+                  [bool] $SuppressRedirect
+              )
+
+              $headers = @{
+                  Authorization = "Bearer $env:MARKETPLACE_CREDENTIAL"
+                  Accept = "application/json"
+                  "User-Agent" = "GalleryFedAuthRedirectRepro"
+              }
+
+              if ($SuppressRedirect)
+              {
+                  $headers["X-TFS-FedAuthRedirect"] = "Suppress"
+              }
+
+              $response = Invoke-WebRequest `
+                  -Method Post `
+                  -Uri $targetUrl `
+                  -Headers $headers `
+                  -ContentType "application/json" `
+                  -Body $requestBody `
+                  -MaximumRedirection 10 `
+                  -SkipHttpErrorCheck
+
+              $contentType = [string] $response.Headers["Content-Type"]
+              $isHtml =
+                  $contentType.StartsWith(
+                      "text/html",
+                      [StringComparison]::OrdinalIgnoreCase)
+
+              [PSCustomObject] @{
+                  StatusCode = [int] $response.StatusCode
+                  ContentType = $contentType
+                  IsHtml = $isHtml
+              }
+          }
+
+          $withoutSuppression =
+              Invoke-UnauthorizedUpload -SuppressRedirect $false
+          $withSuppression =
+              Invoke-UnauthorizedUpload -SuppressRedirect $true
+
+          Write-Host (
+              "Without suppression: HTTP " +
+              "$($withoutSuppression.StatusCode), " +
+              "Content-Type '$($withoutSuppression.ContentType)', " +
+              "HTML=$($withoutSuppression.IsHtml)")
+
+          Write-Host (
+              "With suppression: HTTP " +
+              "$($withSuppression.StatusCode), " +
+              "Content-Type '$($withSuppression.ContentType)', " +
+              "HTML=$($withSuppression.IsHtml)")
+
+          if ($withoutSuppression.StatusCode -ne 200 -or
+              -not $withoutSuppression.IsHtml)
+          {
+              throw (
+                  "The request without suppression did not reproduce " +
+                  "the HTTP 200 HTML response.")
+          }
+
+          if ($withSuppression.StatusCode -notin @(401, 403) -or
+              $withSuppression.IsHtml)
+          {
+              throw (
+                  "The suppressed request did not return the expected " +
+                  "REST-style 401/403 response.")
+          }
+
+          Write-Host "Gallery FedAuth redirect behavior reproduced."
